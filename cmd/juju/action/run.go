@@ -30,13 +30,15 @@ func NewRunCommand() cmd.Command {
 // params
 type runCommand struct {
 	ActionCommandBase
-	unitTags     []names.UnitTag
-	actionName   string
-	paramsYAML   cmd.FileVar
-	parseStrings bool
-	wait         waitFlag
-	out          cmd.Output
-	args         [][]string
+	unitTags       []names.UnitTag
+	applicationTag names.ApplicationTag
+	actionName     string
+	paramsYAML     cmd.FileVar
+	parseStrings   bool
+	wait           waitFlag
+	leader         bool
+	out            cmd.Output
+	args           [][]string
 }
 
 const runDoc = `
@@ -128,6 +130,7 @@ func (c *runCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.Var(&c.paramsYAML, "params", "Path to yaml-formatted params file")
 	f.BoolVar(&c.parseStrings, "string-args", false, "Use raw string values of CLI args")
 	f.Var(&c.wait, "wait", "Wait for results, with optional timeout")
+	f.BoolVar(&c.leader, "leader", false, "Run the action on the lead unit")
 }
 
 func (c *runCommand) Info() *cmd.Info {
@@ -142,30 +145,55 @@ func (c *runCommand) Info() *cmd.Info {
 // Init gets the unit tag(s), action name and action arguments.
 func (c *runCommand) Init(args []string) error {
 	var unitNames []string
-	for idx, arg := range args {
-		if names.IsValidUnit(arg) {
-			unitNames = args[:idx+1]
-		} else if ActionNameRule.MatchString(arg) {
-			c.actionName = arg
-			break
-		} else {
-			return errors.Errorf("invalid unit or action name %q", arg)
+	if c.leader {
+		// Run on the leader. Extract application name from command line.
+		switch len(args) {
+		case 0:
+			return errors.New("no application specified")
+		case 1:
+			return errors.New("no action specified")
+		default:
+			if names.IsValidApplication(args[0]) {
+				c.applicationTag = names.NewApplicationTag(args[0])
+			} else {
+				return errors.Errorf("invalid application name %q", args[0])
+			}
+			if ActionNameRule.MatchString(args[1]) {
+				c.actionName = args[1]
+			} else {
+				return errors.Errorf("invalid action name %q", args[1])
+			}
 		}
+		args = args[2:]
+	} else {
+		// Run on one or more units. Extract units from the command line.
+		for idx, arg := range args {
+			if names.IsValidUnit(arg) {
+				unitNames = args[:idx+1]
+			} else if ActionNameRule.MatchString(arg) {
+				c.actionName = arg
+				break
+			} else {
+				return errors.Errorf("invalid unit or action name %q", arg)
+			}
+		}
+		if len(unitNames) == 0 {
+			return errors.New("no unit specified")
+		}
+		c.unitTags = make([]names.UnitTag, len(unitNames))
+		for idx, unitName := range unitNames {
+			c.unitTags[idx] = names.NewUnitTag(unitName)
+		}
+		args = args[len(unitNames)+1:]
 	}
-	if len(unitNames) == 0 {
-		return errors.New("no unit specified")
-	}
+
 	if c.actionName == "" {
 		return errors.New("no action specified")
-	}
-	c.unitTags = make([]names.UnitTag, len(unitNames))
-	for idx, unitName := range unitNames {
-		c.unitTags[idx] = names.NewUnitTag(unitName)
 	}
 
 	// Parse CLI key-value args if they exist.
 	c.args = make([][]string, 0)
-	for _, arg := range args[len(unitNames)+1:] {
+	for _, arg := range args {
 		thisArg := strings.SplitN(arg, "=", 2)
 		if len(thisArg) != 2 {
 			return errors.Errorf("argument %q must be of the form key...=value", arg)
@@ -241,6 +269,11 @@ func (c *runCommand) Run(ctx *cmd.Context) error {
 	typedConformantParams, ok := conformantParams.(map[string]interface{})
 	if !ok {
 		return errors.Errorf("params must be a map, got %T", typedConformantParams)
+	}
+
+	if c.leader {
+		// Find the leader of c.applicationTag and populate c.unitTags
+		return errors.New("not implemented")
 	}
 
 	actions := make([]params.Action, len(c.unitTags))
